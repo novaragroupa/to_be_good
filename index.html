@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>رفع ملفات الموبايل</title>
+<style>
+  :root { --bg:#0f172a; --card:#1e293b; --text:#f8fafc; --muted:#94a3b8; --ok:#22c55e; --bad:#ef4444; --accent:#f59e0b; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font-family: system-ui, -apple-system, "Segoe UI", Tahoma, sans-serif; font-size:22px; line-height:1.5; padding:16px; }
+  h1 { font-size:30px; margin:8px 0 16px; text-align:center; }
+  .card { background:var(--card); border-radius:20px; padding:16px; margin-bottom:16px; }
+  input[type=password], input[type=text] { width:100%; font-size:26px; padding:18px; border-radius:14px; border:3px solid #475569; background:#0b1220; color:var(--text); }
+  .btn { display:block; width:100%; min-height:96px; font-size:30px; font-weight:700; border:0; border-radius:20px; margin-top:12px; color:#0f172a; background:var(--accent); cursor:pointer; }
+  .btn.green { background:var(--ok); }
+  .btn.gray { background:#64748b; color:#fff; }
+  .btn:disabled { opacity:.4; }
+  .file { background:#0b1220; border-radius:14px; padding:12px; margin-top:10px; word-break:break-all; }
+  .bar { height:18px; background:#334155; border-radius:9px; overflow:hidden; margin-top:8px; }
+  .bar > div { height:100%; width:0; background:var(--accent); transition:width .2s; }
+  .st-ok { color:var(--ok); } .st-bad { color:var(--bad); }
+  #msg { text-align:center; min-height:34px; color:var(--muted); }
+  .small { font-size:18px; color:var(--muted); }
+</style>
+</head>
+<body>
+<h1>رفع ملفات الموبايل</h1>
+
+<div class="card">
+  <label for="pw">الباسورد</label>
+  <input id="pw" type="password" autocomplete="current-password">
+  <input id="picker" type="file" multiple hidden>
+  <button class="btn" id="pick">اختار ملفات</button>
+  <button class="btn green" id="go" disabled>ابدأ الرفع</button>
+  <button class="btn gray" id="retry" hidden>جرّب الفاشل تاني</button>
+  <p id="msg"></p>
+  <p class="small">سيب الصفحة مفتوحة والشاشة شغالة لحد ما كله يخلص.</p>
+</div>
+
+<div id="list"></div>
+
+<script>
+// ====== الإعدادات: حط رابط الـ Web App بتاع Apps Script هنا ======
+const APPS_SCRIPT_URL = 'PUT_YOUR_WEB_APP_URL_HERE';
+// حجم الجزء: لازم يكون مضاعف 256KB (3MB = 12 × 256KB)
+const CHUNK = 12 * 256 * 1024;
+const RETRIES = 4;
+// ================================================================
+
+const $ = (id) => document.getElementById(id);
+let items = [];   // {file, row, bar, status, state}
+let running = false;
+let wakeLock = null;
+
+try { $('pw').value = localStorage.getItem('pr_pw') || ''; } catch (e) {}
+
+$('pick').onclick = () => $('picker').click();
+$('picker').onchange = () => {
+  items = [];
+  $('list').innerHTML = '';
+  Array.from($('picker').files).forEach((file) => {
+    const row = document.createElement('div');
+    row.className = 'file';
+    row.innerHTML = '<div></div><div class="bar"><div></div></div><div class="st"></div>';
+    row.children[0].textContent = file.name + ' (' + fmt(file.size) + ')';
+    $('list').appendChild(row);
+    items.push({ file, bar: row.querySelector('.bar > div'), status: row.querySelector('.st'), state: 'wait' });
+  });
+  $('go').disabled = items.length === 0;
+  $('retry').hidden = true;
+  $('msg').textContent = items.length ? 'اخترت ' + items.length + ' ملف' : '';
+};
+
+$('go').onclick = () => run(['wait']);
+$('retry').onclick = () => run(['failed']);
+
+function fmt(n) {
+  if (n > 1073741824) return (n / 1073741824).toFixed(2) + ' GB';
+  if (n > 1048576) return (n / 1048576).toFixed(1) + ' MB';
+  return Math.ceil(n / 1024) + ' KB';
+}
+
+async function api(body) {
+  // بدون headers عشان يفضل طلب بسيط ومايحصلش مشكلة CORS
+  const res = await fetch(APPS_SCRIPT_URL, { method: 'POST', body: JSON.stringify(body) });
+  return res.json();
+}
+
+function toBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result).split(',')[1] || '');
+    r.onerror = () => reject(r.error);
+    r.readAsDataURL(blob);
+  });
+}
+
+async function withRetry(fn) {
+  let last;
+  for (let i = 0; i < RETRIES; i++) {
+    try {
+      const r = await fn();
+      if (r && r.ok) return r;
+      if (r && r.error === 'bad_password') throw new Error('bad_password');
+      last = new Error((r && r.error) || 'فشل');
+    } catch (e) {
+      if (e.message === 'bad_password') throw e;
+      last = e;
+    }
+    await new Promise((r) => setTimeout(r, 1500 * (i + 1)));
+  }
+  throw last;
+}
+
+async function uploadOne(it, pw) {
+  const f = it.file;
+  it.bar.style.width = '0%';
+  it.status.textContent = 'جاري الرفع...';
+  const s = await withRetry(() => api({ action: 'start', pw, name: f.name, size: f.size, mime: f.type }));
+  let offset = 0;
+  while (offset < f.size) {
+    const end = Math.min(offset + CHUNK, f.size);
+    const data = await toBase64(f.slice(offset, end));
+    await withRetry(() => api({ action: 'chunk', pw, session: s.session, start: offset, total: f.size, data }));
+    offset = end;
+    it.bar.style.width = Math.round((offset / f.size) * 100) + '%';
+  }
+}
+
+async function run(states) {
+  if (running) return;
+  if (!APPS_SCRIPT_URL || APPS_SCRIPT_URL.indexOf('PUT_YOUR') === 0) {
+    $('msg').textContent = 'لسه ما حطيتش رابط الـ Web App جوه index.html';
+    return;
+  }
+  const pw = $('pw').value;
+  if (!pw) { $('msg').textContent = 'اكتب الباسورد الأول'; return; }
+  try { localStorage.setItem('pr_pw', pw); } catch (e) {}
+
+  running = true;
+  $('go').disabled = true; $('retry').hidden = true;
+  try { if (navigator.wakeLock) wakeLock = await navigator.wakeLock.request('screen'); } catch (e) {}
+  window.onbeforeunload = () => 'الرفع شغال';
+
+  $('msg').textContent = 'بتأكد من الباسورد...';
+  try {
+    await withRetry(() => api({ action: 'ping', pw }));
+  } catch (e) {
+    $('msg').textContent = e.message === 'bad_password' ? 'الباسورد غلط' : 'مش قادر أوصل للسيرفر: ' + e.message;
+    finish(); return;
+  }
+
+  let done = 0, failed = 0;
+  for (const it of items) {
+    if (!states.includes(it.state)) continue;
+    $('msg').textContent = 'بيرفع: ' + it.file.name;
+    try {
+      await uploadOne(it, pw);
+      it.state = 'done'; it.status.textContent = 'تم'; it.status.className = 'st st-ok'; done++;
+    } catch (e) {
+      it.state = 'failed'; it.status.textContent = 'فشل: ' + e.message; it.status.className = 'st st-bad'; failed++;
+      if (e.message === 'bad_password') break;
+    }
+  }
+  $('msg').textContent = 'خلص. نجح ' + done + (failed ? ' وفشل ' + failed : '');
+  $('retry').hidden = !items.some((i) => i.state === 'failed');
+  finish();
+}
+
+function finish() {
+  running = false;
+  window.onbeforeunload = null;
+  try { if (wakeLock) wakeLock.release(); } catch (e) {}
+  $('go').disabled = !items.some((i) => i.state === 'wait');
+}
+</script>
+</body>
+</html>
