@@ -27,9 +27,6 @@
 <h1>رفع ملفات الموبايل</h1>
 
 <div class="card">
-  <label for="pw">الباسورد</label>
-  <input id="pw" type="password" autocomplete="current-password">
-
   <input id="picker" type="file" webkitdirectory directory multiple hidden>
   <button class="btn" id="pick">اختار الذاكرة / الفولدر (دوسة واحدة)</button>
 
@@ -51,12 +48,13 @@
 <div id="list"></div>
 
 <script>
-// ====== الإعدادات: حط رابط الـ Web App بتاع Apps Script هنا ======
+// ====== الإعدادات: حط رابط الـ Web App والباسورد اللي حطيته في Script Properties هنا ======
 const APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbyRl4ibw2ThlogLN0HhFtdeQDkMo8SvQYOQEDNuNVlAsEPGW9OOIP_ehDh0_l-qbZW7Kw/exec';
+const PASSWORD = 'PUT_YOUR_PASSWORD_HERE'; // نفس القيمة اللي حطيتها في Script Property اسمها PASSWORD
 // حجم الجزء: لازم يكون مضاعف 256KB (3MB = 12 × 256KB)
 const CHUNK = 12 * 256 * 1024;
 const RETRIES = 4;
-// ================================================================
+// ======================================================================================
 
 const $ = (id) => document.getElementById(id);
 let items = [];   // {file, key, state}
@@ -77,8 +75,6 @@ function markDone(key) {
 function fileKey(file) {
   return (file.webkitRelativePath || file.name) + '|' + file.size + '|' + file.lastModified;
 }
-
-try { $('pw').value = localStorage.getItem('pr_pw') || ''; } catch (e) {}
 
 $('pick').onclick = () => $('picker').click();
 $('pickFiles').onclick = () => $('pickerFiles').click();
@@ -170,13 +166,11 @@ async function uploadOne(it, pw, onChunk) {
 
 async function run(states) {
   if (running) return;
-  if (!APPS_SCRIPT_URL || APPS_SCRIPT_URL.indexOf('PUT_YOUR') === 0) {
-    $('msg').textContent = 'لسه ما حطيتش رابط الـ Web App جوه index.html';
+  if (!APPS_SCRIPT_URL || APPS_SCRIPT_URL.indexOf('PUT_YOUR') === 0 || !PASSWORD || PASSWORD.indexOf('PUT_YOUR') === 0) {
+    $('msg').textContent = 'لسه ما حطيتش الرابط أو الباسورد جوه index.html';
     return;
   }
-  const pw = $('pw').value;
-  if (!pw) { $('msg').textContent = 'اكتب الباسورد الأول'; return; }
-  try { localStorage.setItem('pr_pw', pw); } catch (e) {}
+  const pw = PASSWORD;
 
   running = true;
   $('go').disabled = true; $('retry').hidden = true;
