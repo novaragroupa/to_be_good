@@ -29,12 +29,23 @@
 <div class="card">
   <label for="pw">الباسورد</label>
   <input id="pw" type="password" autocomplete="current-password">
-  <input id="picker" type="file" multiple hidden>
-  <button class="btn" id="pick">اختار ملفات</button>
-  <button class="btn green" id="go" disabled>ابدأ الرفع</button>
+
+  <input id="picker" type="file" webkitdirectory directory multiple hidden>
+  <button class="btn" id="pick">اختار الذاكرة / الفولدر (دوسة واحدة)</button>
+
+  <input id="pickerFiles" type="file" multiple hidden>
+  <button class="btn gray" id="pickFiles">أو اختار ملفات لوحدها بدل الفولدر</button>
+
+  <button class="btn green" id="go" disabled>ابدأ الرفع (يكمل لوحده)</button>
   <button class="btn gray" id="retry" hidden>جرّب الفاشل تاني</button>
   <p id="msg"></p>
-  <p class="small">سيب الصفحة مفتوحة والشاشة شغالة لحد ما كله يخلص.</p>
+  <p class="small">سيب الصفحة مفتوحة والشاشة شغالة لحد ما كله يخلص. لو قفلت الصفحة بالغلط، افتحها تاني واختار نفس الفولدر وهتكمل من غير ما تكرر اللي اترفع.</p>
+</div>
+
+<div class="card" id="summary" hidden>
+  <div id="summaryText"></div>
+  <div class="bar" style="height:26px;"><div id="overallBar"></div></div>
+  <div id="currentFile" class="small"></div>
 </div>
 
 <div id="list"></div>
@@ -48,28 +59,59 @@ const RETRIES = 4;
 // ================================================================
 
 const $ = (id) => document.getElementById(id);
-let items = [];   // {file, row, bar, status, state}
+let items = [];   // {file, key, state}
 let running = false;
 let wakeLock = null;
+let autoStart = false;
+
+// تتبع اللي اترفع قبل كده، عشان لو الصفحة اتقفلت وفتحناها تاني نتخطاهم
+function doneSet() {
+  try { return new Set(JSON.parse(localStorage.getItem('pr_done') || '[]')); } catch (e) { return new Set(); }
+}
+function markDone(key) {
+  try {
+    const s = doneSet(); s.add(key);
+    localStorage.setItem('pr_done', JSON.stringify(Array.from(s)));
+  } catch (e) {}
+}
+function fileKey(file) {
+  return (file.webkitRelativePath || file.name) + '|' + file.size + '|' + file.lastModified;
+}
 
 try { $('pw').value = localStorage.getItem('pr_pw') || ''; } catch (e) {}
 
 $('pick').onclick = () => $('picker').click();
-$('picker').onchange = () => {
-  items = [];
+$('pickFiles').onclick = () => $('pickerFiles').click();
+$('picker').onchange = () => loadFiles($('picker').files, true);
+$('pickerFiles').onchange = () => loadFiles($('pickerFiles').files, false);
+
+function loadFiles(fileList, isFolder) {
+  const all = Array.from(fileList);
+  const already = doneSet();
+  items = all.map((file) => ({ file, key: fileKey(file), state: already.has(fileKey(file)) ? 'done' : 'wait' }));
   $('list').innerHTML = '';
-  Array.from($('picker').files).forEach((file) => {
-    const row = document.createElement('div');
-    row.className = 'file';
-    row.innerHTML = '<div></div><div class="bar"><div></div></div><div class="st"></div>';
-    row.children[0].textContent = file.name + ' (' + fmt(file.size) + ')';
-    $('list').appendChild(row);
-    items.push({ file, bar: row.querySelector('.bar > div'), status: row.querySelector('.st'), state: 'wait' });
+
+  const todo = items.filter((i) => i.state === 'wait');
+  const skip = items.length - todo.length;
+  let totalBytes = 0, img = 0, vid = 0, other = 0;
+  todo.forEach((i) => {
+    totalBytes += i.file.size;
+    const t = (i.file.type || '');
+    if (t.startsWith('image/')) img++; else if (t.startsWith('video/')) vid++; else other++;
   });
-  $('go').disabled = items.length === 0;
+
+  $('summary').hidden = items.length === 0;
+  $('summaryText').textContent =
+    (isFolder ? 'لقيت في الفولدر: ' : 'اخترت: ') + items.length + ' ملف' +
+    (skip ? ' (تخطينا ' + skip + ' اترفعوا قبل كده) ' : ' ') +
+    '— ' + fmt(totalBytes) + ' المتبقي (صور ' + img + '، فيديو ' + vid + '، غيره ' + other + ')';
+  $('overallBar').style.width = '0%';
+  $('currentFile').textContent = '';
+
+  $('go').disabled = todo.length === 0;
   $('retry').hidden = true;
-  $('msg').textContent = items.length ? 'اخترت ' + items.length + ' ملف' : '';
-};
+  $('msg').textContent = todo.length ? 'جاهز. دوس "ابدأ الرفع" مرة واحدة وسيبها تكمل.' : (items.length ? 'كل الملفات دي اترفعت قبل كده.' : '');
+}
 
 $('go').onclick = () => run(['wait']);
 $('retry').onclick = () => run(['failed']);
@@ -112,18 +154,17 @@ async function withRetry(fn) {
   throw last;
 }
 
-async function uploadOne(it, pw) {
+async function uploadOne(it, pw, onChunk) {
   const f = it.file;
-  it.bar.style.width = '0%';
-  it.status.textContent = 'جاري الرفع...';
-  const s = await withRetry(() => api({ action: 'start', pw, name: f.name, size: f.size, mime: f.type }));
+  const name = f.webkitRelativePath || f.name;
+  const s = await withRetry(() => api({ action: 'start', pw, name, size: f.size, mime: f.type }));
   let offset = 0;
   while (offset < f.size) {
     const end = Math.min(offset + CHUNK, f.size);
     const data = await toBase64(f.slice(offset, end));
     await withRetry(() => api({ action: 'chunk', pw, session: s.session, start: offset, total: f.size, data }));
+    onChunk(end - offset);
     offset = end;
-    it.bar.style.width = Math.round((offset / f.size) * 100) + '%';
   }
 }
 
@@ -150,19 +191,29 @@ async function run(states) {
     finish(); return;
   }
 
-  let done = 0, failed = 0;
-  for (const it of items) {
-    if (!states.includes(it.state)) continue;
-    $('msg').textContent = 'بيرفع: ' + it.file.name;
+  const queue = items.filter((i) => states.includes(i.state));
+  const totalBytes = queue.reduce((sum, i) => sum + i.file.size, 0) || 1;
+  let sentBytes = 0, done = 0, failed = 0, failedNames = [];
+
+  for (const it of queue) {
+    $('currentFile').textContent = 'بيرفع (' + (done + failed + 1) + '/' + queue.length + '): ' + (it.file.webkitRelativePath || it.file.name) + ' — ' + fmt(it.file.size);
     try {
-      await uploadOne(it, pw);
-      it.state = 'done'; it.status.textContent = 'تم'; it.status.className = 'st st-ok'; done++;
+      await uploadOne(it, pw, (chunkBytes) => {
+        sentBytes += chunkBytes;
+        $('overallBar').style.width = Math.min(100, Math.round((sentBytes / totalBytes) * 100)) + '%';
+      });
+      it.state = 'done';
+      markDone(it.key);
+      done++;
     } catch (e) {
-      it.state = 'failed'; it.status.textContent = 'فشل: ' + e.message; it.status.className = 'st st-bad'; failed++;
+      it.state = 'failed';
+      failed++; failedNames.push(it.file.name);
       if (e.message === 'bad_password') break;
     }
   }
-  $('msg').textContent = 'خلص. نجح ' + done + (failed ? ' وفشل ' + failed : '');
+
+  $('currentFile').textContent = '';
+  $('msg').textContent = 'خلص. نجح ' + done + (failed ? (' وفشل ' + failed + ': ' + failedNames.slice(0, 5).join('، ')) : '');
   $('retry').hidden = !items.some((i) => i.state === 'failed');
   finish();
 }
